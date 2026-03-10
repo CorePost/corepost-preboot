@@ -2,22 +2,26 @@
 
 `corepost-preboot` — Debian-ориентированный предзагрузочный модуль допуска для CorePost. Он предназначен для `initramfs-tools`, поднимает сеть до загрузки основной ОС, запрашивает серверный токен расшифровки и участвует в 2FA/3FA-сценарии открытия LUKS.
 
-## Что изменено относительно старой версии
+## Назначение
 
-- убран Arch-only фокус на `mkinitcpio`;
-- убран хардкод устройств, сетевых интерфейсов и серверных адресов;
-- добавлен конфиг `/etc/corepost-preboot.conf`;
-- добавлен Debian hook для `initramfs-tools`;
-- добавлены скрипты для provisioning, установки в VM и smoke-проверок.
+Компонент отвечает за:
 
-## Структура
+- ранний network bootstrap в initramfs;
+- серверную проверку допуска через `POST /client/AmIOk`;
+- получение токена расшифровки через `GET /client/decrypt`;
+- локальный 2FA/3FA gate перед `cryptsetup luksOpen`.
+
+## Состав
 
 ```text
 initramfs-tools/hooks/corepost-preboot
 initramfs-tools/scripts/local-top/corepost-preboot
 examples/corepost-preboot.conf.example
+scripts/install-into-vm.sh
+scripts/prepare-vm-demo.sh
 scripts/render-config.py
 scripts/register-demo-device.py
+scripts/run-vm-scenario.sh
 docs/qa-handoff.md
 ```
 
@@ -47,6 +51,8 @@ cp examples/corepost-preboot.conf.example ./runtime/corepost-preboot.conf
 - `COREPOST_SERVER_CONNECT_TIMEOUT_SECONDS`, `COREPOST_SERVER_MAX_TIME_SECONDS`
 
 Адрес сервера и все runtime-параметры передаются через конфиг и/или CLI вызывающего компонента.
+
+Важно: `corepost-preboot.conf` должен уже существовать в целевом месте до вызова `update-initramfs -u`. Если пересобрать initramfs без этого файла, hook не сможет встроить конфиг в образ.
 
 ## Provisioning
 
@@ -80,6 +86,23 @@ python3 ./scripts/render-config.py \
   --luks-name corepost-demo-crypt
 ```
 
+## Установка в VM
+
+Для внешнего VM/install harness доступны helper-скрипты:
+
+- `scripts/install-into-vm.sh`
+- `scripts/prepare-vm-demo.sh`
+- `scripts/run-vm-scenario.sh`
+
+Они используют env/CLI-параметры и не требуют жёстко прошитых путей к VM или server instance.
+
+Минимальный порядок:
+
+1. Сгенерировать `corepost-preboot.conf`.
+2. Установить hook, script и config в гостя.
+3. Только после установки конфига выполнить `update-initramfs -u`.
+4. Проверить, что текущий initrd содержит `corepost-preboot` и `corepost-preboot.conf`.
+
 ## Проверка на VM
 
 Проверка на Debian/QEMU-стенде выполняется внешним VM/install harness, а не этим репозиторием. Для QA достаточно:
@@ -92,9 +115,10 @@ python3 ./scripts/render-config.py \
    - `/etc/initramfs-tools/hooks/corepost-preboot`
    - `/etc/initramfs-tools/scripts/local-top/corepost-preboot`
    - `/etc/corepost-preboot.conf`
-3. Выполнить `update-initramfs -u`.
-4. Проверить, что текущий initrd содержит `corepost-preboot` и `corepost-preboot.conf`.
-5. Прогнать allow/deny/network-deny и, если доступен USB-фактор, 3FA.
+3. Убедиться, что `corepost-preboot.conf` уже лежит в `/etc/corepost-preboot.conf`.
+4. Выполнить `update-initramfs -u`.
+5. Проверить, что текущий initrd содержит `corepost-preboot` и `corepost-preboot.conf`.
+6. Прогнать allow/deny/network-deny и, если доступен USB-фактор, 3FA.
 
 ## Логика предзагрузочного сценария
 
@@ -115,6 +139,9 @@ python3 ./scripts/render-config.py \
 ## Что должен использовать install repo после preboot QA
 
 - `examples/corepost-preboot.conf.example`
+- `scripts/install-into-vm.sh`
+- `scripts/prepare-vm-demo.sh`
 - `scripts/render-config.py`
 - `scripts/register-demo-device.py`
+- `scripts/run-vm-scenario.sh`
 - сценарии и ожидаемые результаты из `docs/qa-handoff.md`
