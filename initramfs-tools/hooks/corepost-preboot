@@ -1,0 +1,50 @@
+#!/bin/sh
+set -eu
+
+PREREQ=""
+
+prereqs() {
+    echo "$PREREQ"
+}
+
+case "${1:-}" in
+    prereqs)
+        prereqs
+        exit 0
+        ;;
+esac
+
+. /usr/share/initramfs-tools/hook-functions
+
+copy_exec /usr/bin/curl /usr/bin
+copy_exec /usr/bin/openssl /usr/bin
+copy_exec /usr/sbin/cryptsetup /usr/sbin
+copy_exec /bin/busybox /bin
+copy_exec /usr/bin/ip /usr/bin
+
+if [ -x /usr/sbin/dhclient ]; then
+    copy_exec /usr/sbin/dhclient /usr/sbin
+fi
+
+if [ -x /usr/bin/udhcpc ]; then
+    copy_exec /usr/bin/udhcpc /usr/bin
+fi
+
+if [ -x /usr/sbin/modprobe ]; then
+    copy_exec /usr/sbin/modprobe /usr/sbin
+fi
+
+mkdir -p "${DESTDIR}/etc"
+
+if [ -f /etc/corepost-preboot.conf ]; then
+    cp /etc/corepost-preboot.conf "${DESTDIR}/etc/corepost-preboot.conf"
+fi
+
+if [ -f /etc/resolv.conf ]; then
+    cp /etc/resolv.conf "${DESTDIR}/etc/resolv.conf"
+fi
+
+if [ -f /etc/ssl/certs/ca-certificates.crt ]; then
+    mkdir -p "${DESTDIR}/etc/ssl/certs"
+    cp /etc/ssl/certs/ca-certificates.crt "${DESTDIR}/etc/ssl/certs/ca-certificates.crt"
+fi

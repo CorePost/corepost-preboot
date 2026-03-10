@@ -1,0 +1,239 @@
+#!/bin/sh
+set -eu
+
+PATH="/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin"
+PREREQ=""
+CONFIG_FILE="${COREPOST_PREBOOT_CONFIG_FILE:-/etc/corepost-preboot.conf}"
+COREPOST_STATUS_RESPONSE=""
+COREPOST_UNLOCK_TOKEN=""
+response_file=""
+decrypt_response_file=""
+
+prereqs() {
+    echo "$PREREQ"
+}
+
+case "${1:-}" in
+    prereqs)
+        prereqs
+        exit 0
+        ;;
+esac
+
+log() {
+    echo "[corepost-preboot] $*"
+}
+
+hard_stop() {
+    if command -v panic >/dev/null 2>&1; then
+        panic "corepost-preboot failure: $*"
+    fi
+    exit 1
+}
+
+fail_hard() {
+    log "ERROR: $*"
+    hard_stop "$*"
+}
+
+fail_network() {
+    log "ERROR: $*"
+    case "${COREPOST_NETWORK_FAILURE_POLICY:-deny}" in
+        shell)
+            log "Opening emergency shell because COREPOST_NETWORK_FAILURE_POLICY=shell"
+            exec sh
+            ;;
+        *)
+            hard_stop "$*"
+            ;;
+    esac
+}
+
+load_config() {
+    [ -f "$CONFIG_FILE" ] || fail_hard "Missing config $CONFIG_FILE"
+    # shellcheck disable=SC1090
+    . "$CONFIG_FILE"
+    : "${COREPOST_SERVER_URL:?missing COREPOST_SERVER_URL}"
+    : "${COREPOST_DEVICE_ID:?missing COREPOST_DEVICE_ID}"
+    : "${COREPOST_DEVICE_SECRET:?missing COREPOST_DEVICE_SECRET}"
+    : "${COREPOST_UNLOCK_PROFILE:?missing COREPOST_UNLOCK_PROFILE}"
+    : "${COREPOST_LUKS_DEVICE:?missing COREPOST_LUKS_DEVICE}"
+    : "${COREPOST_LUKS_NAME:?missing COREPOST_LUKS_NAME}"
+    COREPOST_USB_KEY_PATH="${COREPOST_USB_KEY_PATH:-/dev/disk/by-label/COREPOST_USB}"
+    COREPOST_NETWORK_IFACE="${COREPOST_NETWORK_IFACE:-auto}"
+    COREPOST_NETWORK_TIMEOUT_SECONDS="${COREPOST_NETWORK_TIMEOUT_SECONDS:-20}"
+    COREPOST_NETWORK_FAILURE_POLICY="${COREPOST_NETWORK_FAILURE_POLICY:-deny}"
+    COREPOST_REQUEST_RETRIES="${COREPOST_REQUEST_RETRIES:-3}"
+    COREPOST_REQUEST_RETRY_DELAY_SECONDS="${COREPOST_REQUEST_RETRY_DELAY_SECONDS:-2}"
+    COREPOST_SERVER_CONNECT_TIMEOUT_SECONDS="${COREPOST_SERVER_CONNECT_TIMEOUT_SECONDS:-5}"
+    COREPOST_SERVER_MAX_TIME_SECONDS="${COREPOST_SERVER_MAX_TIME_SECONDS:-20}"
+}
+
+pick_iface() {
+    if [ "$COREPOST_NETWORK_IFACE" != "auto" ]; then
+        printf '%s\n' "$COREPOST_NETWORK_IFACE"
+        return 0
+    fi
+
+    ip -o link show | while IFS= read -r line; do
+        iface="${line#*: }"
+        iface="${iface%%:*}"
+        if [ "$iface" != "lo" ]; then
+            printf '%s\n' "$iface"
+            break
+        fi
+    done
+}
+
+bring_network_up() {
+    iface="$(pick_iface)"
+    [ -n "$iface" ] || fail_network "No non-loopback interface found"
+
+    log "Using network interface $iface"
+    ip link set "$iface" up || true
+
+    attempt=1
+    while [ "$attempt" -le "$COREPOST_REQUEST_RETRIES" ]; do
+        if command -v udhcpc >/dev/null 2>&1; then
+            if udhcpc -n -q -t 5 -T 3 -i "$iface" >/dev/null 2>&1; then
+                return 0
+            fi
+        elif command -v dhclient >/dev/null 2>&1; then
+            if dhclient -1 "$iface" >/dev/null 2>&1; then
+                return 0
+            fi
+        else
+            fail_hard "No DHCP client available in initramfs"
+        fi
+
+        log "DHCP attempt $attempt/$COREPOST_REQUEST_RETRIES failed"
+        attempt=$((attempt + 1))
+        if [ "$attempt" -le "$COREPOST_REQUEST_RETRIES" ]; then
+            sleep "$COREPOST_REQUEST_RETRY_DELAY_SECONDS"
+        fi
+    done
+
+    fail_network "Unable to configure network on $iface"
+}
+
+prompt_password() {
+    log "Enter user password for preboot unlock:"
+    if [ -t 0 ] && command -v stty >/dev/null 2>&1; then
+        saved_tty="$(stty -g)"
+        trap 'stty "$saved_tty"' EXIT HUP INT TERM
+        stty -echo
+        IFS= read -r COREPOST_USER_PASSWORD || true
+        stty "$saved_tty"
+        trap - EXIT HUP INT TERM
+        printf '\n'
+    else
+        IFS= read -r COREPOST_USER_PASSWORD || true
+    fi
+    [ -n "${COREPOST_USER_PASSWORD:-}" ] || fail_hard "Empty password is not allowed"
+}
+
+require_usb_factor() {
+    if [ "$COREPOST_UNLOCK_PROFILE" = "3fa" ]; then
+        log "Checking USB factor at $COREPOST_USB_KEY_PATH"
+        [ -e "$COREPOST_USB_KEY_PATH" ] || fail_hard "USB factor not found at $COREPOST_USB_KEY_PATH"
+    fi
+}
+
+build_signature() {
+    method="$1"
+    path="$2"
+    ts="$3"
+    digest="$(printf '%s\n%s\n%s' "$method" "$path" "$ts" | openssl dgst -sha256 -hmac "$COREPOST_DEVICE_SECRET")"
+    printf '%s\n' "${digest##* }"
+}
+
+signed_request() {
+    method="$1"
+    path="$2"
+    response_file="$3"
+    attempt=1
+
+    while [ "$attempt" -le "$COREPOST_REQUEST_RETRIES" ]; do
+        ts="$(date +%s)"
+        signature="$(build_signature "$method" "$path" "$ts")"
+        export CURL_CA_BUNDLE=/etc/ssl/certs/ca-certificates.crt
+
+        http_code="$(
+            curl -sS -o "$response_file" -w '%{http_code}' \
+                --connect-timeout "$COREPOST_SERVER_CONNECT_TIMEOUT_SECONDS" \
+                --max-time "$COREPOST_SERVER_MAX_TIME_SECONDS" \
+                -X "$method" \
+                -H "X-DeviceId: $COREPOST_DEVICE_ID" \
+                -H "X-Timestamp: $ts" \
+                -H "X-Signature: $signature" \
+                "$COREPOST_SERVER_URL$path"
+        )" || http_code="000"
+
+        case "$http_code" in
+            200)
+                return 0
+                ;;
+            000|5??)
+                log "Transient request failure for $method $path (attempt $attempt/$COREPOST_REQUEST_RETRIES, http=$http_code)"
+                ;;
+            401|403)
+                body="$(cat "$response_file" 2>/dev/null || true)"
+                fail_hard "Server denied $method $path with HTTP $http_code${body:+: $body}"
+                ;;
+            *)
+                body="$(cat "$response_file" 2>/dev/null || true)"
+                fail_hard "Unexpected response for $method $path: HTTP $http_code${body:+: $body}"
+                ;;
+        esac
+
+        attempt=$((attempt + 1))
+        if [ "$attempt" -le "$COREPOST_REQUEST_RETRIES" ]; then
+            sleep "$COREPOST_REQUEST_RETRY_DELAY_SECONDS"
+        fi
+    done
+
+    fail_network "Server $COREPOST_SERVER_URL did not answer $method $path after $COREPOST_REQUEST_RETRIES attempts"
+}
+
+request_status() {
+    response_file="/run/corepost-preboot-status.$$"
+    trap 'rm -f "${response_file:-}" "${decrypt_response_file:-}"' EXIT HUP INT TERM
+    signed_request POST "/client/AmIOk" "$response_file"
+    COREPOST_STATUS_RESPONSE="$(cat "$response_file")"
+    case "$COREPOST_STATUS_RESPONSE" in
+        *"\"unlockProfile\":\"$COREPOST_UNLOCK_PROFILE\""*)
+            ;;
+        *)
+            fail_hard "Server unlock profile does not match config profile $COREPOST_UNLOCK_PROFILE"
+            ;;
+    esac
+    rm -f "$response_file"
+}
+
+request_unlock_token() {
+    decrypt_response_file="/run/corepost-preboot-unlock-token.$$"
+    signed_request GET "/client/decrypt" "$decrypt_response_file"
+    COREPOST_UNLOCK_TOKEN="$(cat "$decrypt_response_file")"
+    rm -f "$decrypt_response_file"
+    [ -n "$COREPOST_UNLOCK_TOKEN" ] || fail_hard "Unlock token is empty"
+}
+
+open_encrypted_root() {
+    modprobe dm-crypt >/dev/null 2>&1 || true
+    printf '%s%s' "$COREPOST_USER_PASSWORD" "$COREPOST_UNLOCK_TOKEN" | \
+        cryptsetup luksOpen "$COREPOST_LUKS_DEVICE" "$COREPOST_LUKS_NAME" --key-file=- || \
+        fail_hard "cryptsetup luksOpen failed"
+    log "Opened $COREPOST_LUKS_DEVICE as $COREPOST_LUKS_NAME"
+}
+
+main() {
+    load_config
+    bring_network_up
+    request_status
+    prompt_password
+    require_usb_factor
+    request_unlock_token
+    open_encrypted_root
+}
+
+main "$@"

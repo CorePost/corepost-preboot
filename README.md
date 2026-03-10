@@ -1,165 +1,120 @@
-# Документация по Custom Initramfs для CorePost
+# CorePost Preboot
 
-*Data leaks don't ask permission.*
+`corepost-preboot` — Debian-ориентированный предзагрузочный модуль допуска для CorePost. Он предназначен для `initramfs-tools`, поднимает сеть до загрузки основной ОС, запрашивает серверный токен расшифровки и участвует в 2FA/3FA-сценарии открытия LUKS.
 
----
+## Что изменено относительно старой версии
 
-## Введение
+- убран Arch-only фокус на `mkinitcpio`;
+- убран хардкод устройств, сетевых интерфейсов и серверных адресов;
+- добавлен конфиг `/etc/corepost-preboot.conf`;
+- добавлен Debian hook для `initramfs-tools`;
+- добавлены скрипты для provisioning, установки в VM и smoke-проверок.
 
-Этот пакет содержит кастомное initramfs для реализации многофакторной аутентификации на этапе pre-boot. Он предназначен для корпоративных систем защиты, где до загрузки операционной системы производится проверка факторов (например, ввод пароля, сетевые проверки, взаимодействие с сервером) для последующего расшифрования LUKS-тома.
+## Структура
 
-В репозитории содержатся три файла:
-- **mkinitcpio.conf** – конфигурационный файл для `mkinitcpio`.
-- **install** – скрипт установки (install hook), который определяет, какие модули и бинарники добавить в initramfs.
-- **hook** – основной hook, реализующий логику многофакторной проверки (например, запрос пароля, подключение к сети, вызов `cryptsetup`).
-
----
-
-## Структура репозитория
-
-```
-.
-├── hook                 # Основной hook (скрипт с run_hook)
-├── install              # Скрипт установки, описывающий, какие модули и бинарники включить
-└── mkinitcpio.conf      # Конфигурационный файл для сборки initramfs
+```text
+initramfs-tools/hooks/corepost-preboot
+initramfs-tools/scripts/local-top/corepost-preboot
+examples/corepost-preboot.conf.example
+scripts/render-config.py
+scripts/register-demo-device.py
+docs/qa-handoff.md
 ```
 
-### Файлы
+## Конфигурация
 
-- **hook**  
-  Содержит функцию `run_hook()`, которая выполняется во время сборки initramfs. В этом hook:
-  - Запрашивается ввод пароля у пользователя.
-  - Выполняется проверка наличия устройства (например, `/dev/sdb1`).
-  - Запускается команда `cryptsetup luksOpen` для расшифровки зашифрованного тома.
-  - Производится сетевой тест (с использованием `curl`) для проверки соединения.
+Шаблон:
 
-- **install**  
-  Определяет, какие модули и бинарники будут добавлены в initramfs. Здесь используются функции `add_module`, `add_binary`, `add_udev_rule` и `add_runscript` для включения необходимых компонентов, таких как:
-  - Модули ядра: `dm-crypt`, `dm-mod` (и дополнительные модули, если требуется).
-  - Бинарники: `cryptsetup`, `curl`, `libgcc_s.so.1`, и `legacy.so` из ossl-modules.
-  
-- **mkinitcpio.conf**  
-  Основной конфигурационный файл для `mkinitcpio`, который задает:
-  - **MODULES** – список модулей ядра, которые будут включены (например, драйвер сетевой карты, dm-crypt и dm-mod).
-  - **BINARIES** – дополнительные бинарники (если нужны).
-  - **FILES** – файлы, которые необходимо включить в initramfs (например, сертификаты CA).
-  - **HOOKS** – список hook-скриптов, где наш custom hook (`keycheck`) указывается вместе с базовыми хуками (base, udev, autodetect, modconf, keyboard, block, filesystems).
+```bash
+cp examples/corepost-preboot.conf.example ./runtime/corepost-preboot.conf
+```
 
----
+Обязательные поля:
 
-## Установка и интеграция
+- `COREPOST_SERVER_URL`
+- `COREPOST_DEVICE_ID`
+- `COREPOST_DEVICE_SECRET`
+- `COREPOST_UNLOCK_PROFILE`
+- `COREPOST_LUKS_DEVICE`
+- `COREPOST_LUKS_NAME`
 
-Чтобы использовать данное initramfs в своей системе, выполните следующие шаги:
+Дополнительно:
 
-1. **Клонирование репозитория**  
-   Склонируйте репозиторий с файлами initramfs в удобное место, например:
-   ```bash
-   git clone https://github.com/corepost/corepost-initramfs.git
-   cd corepost-initramfs
-   ```
+- `COREPOST_USB_KEY_PATH` для `3fa`
+- `COREPOST_NETWORK_IFACE=auto`
+- `COREPOST_NETWORK_FAILURE_POLICY=deny|shell`
+- `COREPOST_REQUEST_RETRIES`, `COREPOST_REQUEST_RETRY_DELAY_SECONDS`
+- `COREPOST_SERVER_CONNECT_TIMEOUT_SECONDS`, `COREPOST_SERVER_MAX_TIME_SECONDS`
 
-2. **Линковка кастомных хуков**  
-   Для того чтобы mkinitcpio увидел ваши кастомные скрипты, создайте симлинки в системных каталогах:
-   ```bash
-   sudo ln -sf $(pwd)/hook /etc/initcpio/hooks/keycheck
-   sudo ln -sf $(pwd)/install /etc/initcpio/install/keycheck
-   ```
-   _Примечание:_ Если вы хотите использовать эту сборку отдельно и не вмешиваться в системный initramfs, можно указать опцию `-d <path>` при сборке (например, `-d $(pwd)`).
+Адрес сервера и все runtime-параметры передаются через конфиг и/или CLI вызывающего компонента.
 
-3. **Сборка кастомного initramfs**  
-   Используйте команду `mkinitcpio` с указанием вашего конфигурационного файла:
-   ```bash
-   sudo mkinitcpio -k "$(uname -r)" -g /boot/initramfs.img -c $(pwd)/mkinitcpio.conf
-   ```
-   Эта команда создаст файл `/boot/initramfs.img`, который затем можно выбрать через загрузчик GRUB.
+## Provisioning
 
-4. **Настройка GRUB**  
-   Добавьте новую запись в GRUB (например, через файл `/etc/grub.d/40_custom`), чтобы загрузить ядро с вашим initramfs:
-   ```grub
-   menuentry "CorePost Custom Initramfs" {
-       insmod ext2
-       set root=(hd0,2)
-       linux /vmlinuz-linux root=/dev/mapper/cryptroot rw
-       initrd /initramfs.img
-   }
-   ```
-   Обновите конфигурацию GRUB:
-   ```bash
-   sudo grub-mkconfig -o /boot/grub/grub.cfg
-   ```
+Для регистрации и получения provisioning bundle вызывающий компонент должен знать:
 
----
+- базовый URL server instance;
+- admin token;
+- guest-visible URL этого же instance, если VM видит host по другому адресу.
 
-## Техническое описание работы
+Регистрация demo-устройства:
 
-### 1. Сборка initramfs
+```bash
+python3 ./scripts/register-demo-device.py \
+  --server-url "$SERVER_BASE_URL" \
+  --admin-token "$ADMIN_TOKEN" \
+  --display-name corepost-preboot-demo \
+  --unlock-profile 2fa \
+  --output ./runtime/corepost-preboot-bundle.json
+```
 
-- **MODULES:**  
-  Указанные модули (например, `e1000` для сетевой карты, `dm-crypt`, `dm-mod`, `aes`, `sha256`, `cryptd`) включаются в initramfs. Они необходимы для работы расшифровки тома и, в случае наличия сетевого интерфейса, для подключения к сети.
+Скрипт возвращает `deviceId`, `deviceSecret`, `unlockToken` и остальные provisioning-данные. Из него нужно собрать `/etc/corepost-preboot.conf`.
 
-- **BINARIES и FILES:**  
-  Дополнительные бинарники, такие как `cryptsetup`, `curl` и сертификаты CA (если указаны), включаются для обеспечения работы команд в initramfs.
+Автогенерация конфига:
 
-- **HOOKS:**  
-  Система запускает базовые хуки (base, udev и т.д.) и затем кастомный hook `keycheck`. Функция `run_hook()` внутри этого скрипта отвечает за:
-  - Запрос пароля у пользователя.
-  - Проверку наличия зашифрованного устройства (например, `/dev/sdb1`).
-  - Выполнение расшифровки с помощью `cryptsetup luksOpen`.
-  - Проведение сетевой проверки.
-  - При возникновении ошибок (например, неправильный пароль, отсутствие сети) может либо повторить попытку, либо дать пользователю доступ к интерактивной оболочке.
+```bash
+python3 ./scripts/render-config.py \
+  --bundle-json ./runtime/corepost-preboot-bundle.json \
+  --output ./runtime/corepost-preboot.conf \
+  --server-url "$SERVER_GUEST_URL" \
+  --luks-device /dev/corepost-preboot-demo-luks \
+  --luks-name corepost-demo-crypt
+```
 
-### 2. Логика работы custom hook
+## Проверка на VM
 
-- **Ввод пароля:**  
-  Пользователю предлагается ввести пароль для расшифровки диска.
+Проверка на Debian/QEMU-стенде выполняется внешним VM/install harness, а не этим репозиторием. Для QA достаточно:
 
-- **Проверка устройства:**  
-  Скрипт ожидает появления устройства (диск, который планируется расшифровать) в течение заданного времени.
+1. Скопировать в гостя:
+   - `initramfs-tools/hooks/corepost-preboot`
+   - `initramfs-tools/scripts/local-top/corepost-preboot`
+   - сгенерированный `corepost-preboot.conf`
+2. Установить их в госте:
+   - `/etc/initramfs-tools/hooks/corepost-preboot`
+   - `/etc/initramfs-tools/scripts/local-top/corepost-preboot`
+   - `/etc/corepost-preboot.conf`
+3. Выполнить `update-initramfs -u`.
+4. Проверить, что текущий initrd содержит `corepost-preboot` и `corepost-preboot.conf`.
+5. Прогнать allow/deny/network-deny и, если доступен USB-фактор, 3FA.
 
-- **Расшифровка:**  
-  С использованием введенного пароля вызывается `cryptsetup luksOpen` для расшифровки зашифрованного раздела. При успешном выполнении создается маппинг.
+## Логика предзагрузочного сценария
 
-- **Настройка сети:**  
-  После расшифровки выполняется настройка сети. Скрипт получает настройки по DHCP. Также настраивается переменная `CURL_CA_BUNDLE`, чтобы `curl` мог корректно проверять сертификаты.
+1. Initramfs script читает `/etc/corepost-preboot.conf`.
+2. Поднимает сеть через `udhcpc` или `dhclient`.
+3. Выполняет `POST /client/AmIOk` с HMAC-подписью по `deviceSecret`.
+4. Если сервер разрешает допуск, запрашивает пароль пользователя.
+5. Для `3fa` проверяет присутствие USB-фактора.
+6. Выполняет `GET /client/decrypt` и получает `unlockToken`.
+7. Открывает LUKS через `cryptsetup luksOpen`, используя `password + unlockToken`.
+8. При проблемах сети применяет `COREPOST_NETWORK_FAILURE_POLICY`, при deny/401/403 сразу останавливает boot flow.
 
-- **Проверка сети:**  
-  Проводится тестовый запрос к веб-серверу (например, Google) для проверки работоспособности сети.
+## Что должен использовать QA
 
-- **Отладочная оболочка:**  
-  В случае возникновения ошибок (например, при сбое DHCP или невозможности расшифровать диск) initramfs может быть настроен на выдачу интерактивной оболочки (`/bin/sh`) для диагностики.
+- `docs/qa-handoff.md`
+- `examples/corepost-preboot.conf.example`
 
----
+## Что должен использовать install repo после preboot QA
 
-## Запуск и отладка
-
-1. **Сборка initramfs:**  
-   Выполните команду сборки (как описано выше).
-
-2. **Проверка сборки:**  
-   Проверьте содержимое с помощью:
-   ```bash
-   lsinitcpio /boot/initramfs.img
-   ```
-   Убедитесь, что присутствуют необходимые модули и бинарники (например, `dm-crypt`, `cryptsetup`, `curl`, сертификаты).
-
-3. **Тестирование через GRUB:**  
-   Перезагрузитесь и выберите новую запись в GRUB. При загрузке система запустит ваш custom hook, и вы увидите вывод функций (например, запрос пароля, проверка сети).
-
-4. **Отладка:**  
-   Если что-то идет не так, hook настроен на выдачу интерактивного shell (например, можно добавить `exec /bin/sh` в случае ошибок) для диагностики.
-
----
-
-## Заключение
-
-Данный custom initramfs для CorePost обеспечивает:
-- **Многофакторную проверку** на этапе загрузки (ввод пароля, проверка сети, расшифровка раздела).
-- **Гибкую настройку** сети с использованием DHCP (с fallback на статическую конфигурацию).
-- Интеграцию с серверной частью системы для безопасного доступа к данным.
-
-Этот пакет легко интегрируется в корпоративную систему защиты и может быть модифицирован под конкретные требования заказчика.
-
----
-
-*CorePost Project*  
-*Data leaks don't ask permission.*
+- `examples/corepost-preboot.conf.example`
+- `scripts/render-config.py`
+- `scripts/register-demo-device.py`
+- сценарии и ожидаемые результаты из `docs/qa-handoff.md`
