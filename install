@@ -1,0 +1,34 @@
+#!/bin/bash
+
+build() {
+    add_module dm-mod
+    add_binary cryptsetup
+    add_binary curl
+    local mod
+
+    add_module dm-crypt
+    add_module dm-integrity
+    add_module hid-generic?
+    add_all_modules '/crypto/'
+    map add_udev_rule \
+        '10-dm.rules' \
+        '13-dm-disk.rules' \
+        '95-dm-notify.rules' \
+        '/usr/lib/initcpio/udev/11-dm-initramfs.rules'
+
+    # cryptsetup calls pthread_create(), which dlopen()s libgcc_s.so.1
+    add_binary '/usr/lib/libgcc_s.so.1'
+
+    # cryptsetup loads the legacy provider which is required for whirlpool
+    add_binary '/usr/lib/ossl-modules/legacy.so'
+    add_binary /usr/bin/busybox
+    add_runscript
+}
+
+
+
+help() {
+    echo "multifactor hook: passwd + usb + network"
+}
+early_hook=true
+

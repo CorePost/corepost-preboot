@@ -1,0 +1,49 @@
+#!/bin/bash
+
+run_hook() {
+    echo "=== 2 factor ==="
+    echo -n "enter password: "
+    read -rs USER_PASS
+    echo
+    for i in {1..10}; do
+        [ -b /dev/sdb1 ] && break
+        echo "waiting for disk..."
+        sleep 1
+    done
+    if [ ! -b /dev/sdb1 ]; then
+        echo "no /dev/sdb1"
+        sleep 15
+        exit 1
+    fi
+    echo "decrypting disk"
+    modprobe dm-crypt
+    echo "$USER_PASS" | cryptsetup luksOpen /dev/sdb1 cryptroot || {
+        echo "can't decrypt"
+        sleep 15
+        exit 1
+    }
+    echo "Connecting to network via DHCP..."
+    ip link set eth0 up
+    udhcpc -i eth0 -q -t 5
+
+    if ip addr show dev eth0 | grep -q "inet "; then
+        echo "DHCP lease acquired on eth0."
+    else
+        echo "DHCP failed; falling back to static configuration."
+        ip addr add 10.0.2.15/24 dev eth0
+        ip route add default via 10.0.2.2 dev eth0
+        echo "nameserver 8.8.8.8" > /etc/resolv.conf
+    fi
+
+    export CURL_CA_BUNDLE=/etc/ssl/certs/ca-certificates.crt
+
+    echo "=== network check ==="
+    if curl http://google.com | grep -iq "<html"; then
+        echo "network is working got google html."
+    else
+        echo "network is not working nooo"
+    fi
+    sleep 10
+    
+}
+
