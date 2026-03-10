@@ -85,6 +85,23 @@ pick_iface() {
     done
 }
 
+iface_has_address() {
+    iface="$1"
+    ip -4 -o addr show dev "$iface" scope global 2>/dev/null | grep -q 'inet '
+}
+
+run_with_timeout() {
+    timeout_seconds="$1"
+    shift
+
+    if command -v timeout >/dev/null 2>&1; then
+        timeout "$timeout_seconds" "$@"
+        return $?
+    fi
+
+    "$@"
+}
+
 bring_network_up() {
     iface="$(pick_iface)"
     [ -n "$iface" ] || fail_network "No non-loopback interface found"
@@ -92,14 +109,21 @@ bring_network_up() {
     log "Using network interface $iface"
     ip link set "$iface" up || true
 
+    if iface_has_address "$iface"; then
+        log "Interface $iface already has an IPv4 address"
+        return 0
+    fi
+
     attempt=1
     while [ "$attempt" -le "$COREPOST_REQUEST_RETRIES" ]; do
         if command -v udhcpc >/dev/null 2>&1; then
-            if udhcpc -n -q -t 5 -T 3 -i "$iface" >/dev/null 2>&1; then
+            if run_with_timeout "$COREPOST_NETWORK_TIMEOUT_SECONDS" \
+                udhcpc -n -q -t 5 -T 3 -i "$iface" >/dev/null 2>&1; then
                 return 0
             fi
         elif command -v dhclient >/dev/null 2>&1; then
-            if dhclient -1 "$iface" >/dev/null 2>&1; then
+            if run_with_timeout "$COREPOST_NETWORK_TIMEOUT_SECONDS" \
+                dhclient -1 "$iface" >/dev/null 2>&1; then
                 return 0
             fi
         else
