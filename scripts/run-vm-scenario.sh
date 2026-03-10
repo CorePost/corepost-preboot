@@ -3,7 +3,6 @@ set -euo pipefail
 
 SCRIPT_DIR="$(cd "$(dirname "$0")" && pwd)"
 ROOT_DIR="$(cd "$SCRIPT_DIR/.." && pwd)"
-# shellcheck source=scripts/lib/vm-env.sh
 . "$SCRIPT_DIR/lib/vm-env.sh"
 
 ENV_FILE=""
@@ -90,7 +89,6 @@ ADMIN_URL="${ADMIN_URL:-${COREPOST_SERVER_BASE_URL:-}}"
 ADMIN_TOKEN="${ADMIN_TOKEN:-${COREPOST_ADMIN_TOKEN:-}}"
 NETWORK_DENY_SERVER_URL="${NETWORK_DENY_SERVER_URL:-${COREPOST_NETWORK_DENY_SERVER_URL:-}}"
 
-# shellcheck disable=SC1090
 . "$CONFIG_FILE"
 : "${COREPOST_LUKS_NAME:?missing COREPOST_LUKS_NAME}"
 

@@ -2,7 +2,6 @@
 set -euo pipefail
 
 SCRIPT_DIR="$(cd "$(dirname "$0")" && pwd)"
-# shellcheck source=scripts/lib/vm-env.sh
 . "$SCRIPT_DIR/lib/vm-env.sh"
 
 ENV_FILE=""
@@ -55,7 +54,6 @@ if [ ! -f "$CONFIG_FILE" ]; then
   exit 1
 fi
 
-# shellcheck disable=SC1090
 . "$CONFIG_FILE"
 
 : "${COREPOST_LUKS_DEVICE:?missing COREPOST_LUKS_DEVICE}"

@@ -1,4 +1,3 @@
-# CorePost preboot configuration for Debian initramfs-tools.
 COREPOST_SERVER_URL="__SET_ME__"
 COREPOST_DEVICE_ID="replace-me"
 COREPOST_DEVICE_SECRET="replace-me"

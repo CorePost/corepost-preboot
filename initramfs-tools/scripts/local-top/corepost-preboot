@@ -51,7 +51,6 @@ fail_network() {
 
 load_config() {
     [ -f "$CONFIG_FILE" ] || fail_hard "Missing config $CONFIG_FILE"
-    # shellcheck disable=SC1090
     . "$CONFIG_FILE"
     : "${COREPOST_SERVER_URL:?missing COREPOST_SERVER_URL}"
     : "${COREPOST_DEVICE_ID:?missing COREPOST_DEVICE_ID}"

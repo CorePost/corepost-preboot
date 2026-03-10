@@ -13,7 +13,6 @@ load_runtime_env() {
   fi
 
   set -a
-  # shellcheck disable=SC1090
   . "$env_file"
   set +a
 }
